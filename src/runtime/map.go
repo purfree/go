@@ -97,9 +97,10 @@ const (
 	minTopHash     = 5 // minimum tophash for a normal filled cell.
 
 	// flags
-	iterator     = 1 // there may be an iterator using buckets
-	oldIterator  = 2 // there may be an iterator using oldbuckets
-	hashWriting  = 4 // a goroutine is writing to the map
+	iterator    = 1 // there may be an iterator using buckets
+	oldIterator = 2 // there may be an iterator using oldbuckets
+	hashWriting = 4 // a goroutine is writing to the map
+	// 等量扩容，即B的大小未发生变化
 	sameSizeGrow = 8 // the current map growth is to a new map of the same size
 
 	// sentinel bucket ID for iterator checks
@@ -228,9 +229,12 @@ func (h *hmap) incrnoverflow() {
 	// as many overflow buckets as buckets.
 	// We need to be able to count to 1<<h.B.
 	if h.B < 16 {
+		// 当B小于16时，noverflow++，此时noverflow是准确值
 		h.noverflow++
 		return
 	}
+	//当当B大于等于16时，此时noverflow是近似值
+	// fastrand()会生产一个随机值，mash与随机值当结果等于0，则noverflow++
 	// Increment with probability 1/(1<<(h.B-15)).
 	// When we reach 1<<15 - 1, we will have approximately
 	// as many overflow buckets as buckets.
@@ -247,14 +251,18 @@ func (h *hmap) newoverflow(t *maptype, b *bmap) *bmap {
 	if h.extra != nil && h.extra.nextOverflow != nil {
 		// We have preallocated overflow buckets available.
 		// See makeBucketArray for more details.
+		// 获取预分配的bucket，未使用过的
 		ovf = h.extra.nextOverflow
 		if ovf.overflow(t) == nil {
+			// ovf的溢出位指针为空，说明未使用，nextOverflow指向下一个
 			// We're not at the end of the preallocated overflow buckets. Bump the pointer.
 			h.extra.nextOverflow = (*bmap)(add(unsafe.Pointer(ovf), uintptr(t.bucketsize)))
 		} else {
 			// This is the last preallocated overflow bucket.
 			// Reset the overflow pointer on this bucket,
 			// which was set to a non-nil sentinel value.
+			// ovf的溢出位指针不为空，ovf指针位置空，同时h.extra.nextOverflow置空
+			// 猜测可能是因为ovf有问题???
 			ovf.setoverflow(t, nil)
 			h.extra.nextOverflow = nil
 		}
@@ -263,6 +271,8 @@ func (h *hmap) newoverflow(t *maptype, b *bmap) *bmap {
 	}
 	h.incrnoverflow()
 	if t.bucket.ptrdata == 0 {
+		// 如果bucket不包含指针，将ovf放到overflow数组
+		// 猜测是为了重复使用???
 		h.createOverflow()
 		*h.extra.overflow = append(*h.extra.overflow, ovf)
 	}
@@ -342,7 +352,10 @@ func makemap(t *maptype, hint int, h *hmap) *hmap {
 // If dirtyalloc is nil a new backing array will be alloced and
 // otherwise dirtyalloc will be cleared and reused as backing array.
 func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets unsafe.Pointer, nextOverflow *bmap) {
+	// b=6
+	// base=1<<6=64
 	base := bucketShift(b)
+	// nbuckets=64
 	nbuckets := base
 	// For small b, overflow buckets are unlikely.
 	// Avoid the overhead of the calculation.
@@ -350,10 +363,19 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 		// Add on the estimated number of overflow buckets
 		// required to insert the median number of elements
 		// used with this value of b.
+		// nbuckets=64+1<<2=68
 		nbuckets += bucketShift(b - 4)
+		// map[int]int
+		// int.size=8 8个key和value
+		// tophash=8 hash值，8个hash值，每个1位
+		// overflow=8 溢出指针位
+		// t.bucket.size=8*(1+8+8)+8=144
+		// sz=144*68=9792
 		sz := t.bucket.size * nbuckets
+		// up=10240  内存对齐
 		up := roundupsize(sz)
 		if up != sz {
+			// nbuckets=10240/144=71
 			nbuckets = up / t.bucket.size
 		}
 	}
@@ -379,8 +401,11 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 		// we use the convention that if a preallocated overflow bucket's overflow
 		// pointer is nil, then there are more available by bumping the pointer.
 		// We need a safe non-nil pointer for the last overflow bucket; just use buckets.
+		// 获取buckets的第base+1个bucket
 		nextOverflow = (*bmap)(add(buckets, base*uintptr(t.bucketsize)))
+		// 获取buckets的第nbuckets个bucket
 		last := (*bmap)(add(buckets, (nbuckets-1)*uintptr(t.bucketsize)))
+		// 将last的溢出位指针指向buckets
 		last.setoverflow(t, (*bmap)(buckets))
 	}
 	return buckets, nextOverflow
@@ -1091,6 +1116,7 @@ func (h *hmap) sameSizeGrow() bool {
 func (h *hmap) noldbuckets() uintptr {
 	oldB := h.B
 	if !h.sameSizeGrow() {
+		// 不是等量扩容，newB = oldB++
 		oldB--
 	}
 	return bucketShift(oldB)
@@ -1162,6 +1188,7 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 				}
 				k2 := k
 				if t.indirectkey() {
+					// 如果key为指针，获取指针地址
 					k2 = *((*unsafe.Pointer)(k2))
 				}
 				var useY uint8
@@ -1170,6 +1197,8 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 					// to send this key/elem to bucket x or bucket y).
 					hash := t.hasher(k2, uintptr(h.hash0))
 					if h.flags&iterator != 0 && !t.reflexivekey() && !t.key.equal(k2, k2) {
+						// 如果h正在被for range调用，且所有key中有key!=key(发生扩容，地址变动)，且是当前遍历到key(k2)
+
 						// If key != key (NaNs), then the hash could be (and probably
 						// will be) entirely different from the old hash. Moreover,
 						// it isn't reproducible. Reproducibility is required in the
@@ -1181,6 +1210,8 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 						// We recompute a new random tophash for the next level so
 						// these keys will get evenly distributed across all buckets
 						// after multiple grows.
+
+						// 重新计算top
 						useY = top & 1
 						top = tophash(hash)
 					} else {
@@ -1250,6 +1281,7 @@ func advanceEvacuationMark(h *hmap, t *maptype, newbit uintptr) {
 	for h.nevacuate != stop && bucketEvacuated(t, h, h.nevacuate) {
 		h.nevacuate++
 	}
+	// newbit=oldbucket+1，如果h.nevacuate == newbit，说明所有bucket都完成搬迁，可以清空oldbucket
 	if h.nevacuate == newbit { // newbit == # of oldbuckets
 		// Growing is all done. Free old main bucket array.
 		h.oldbuckets = nil

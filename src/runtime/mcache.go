@@ -53,12 +53,12 @@ type mcache struct {
 	flushGen uint32
 }
 
-// A gclink is a node in a linked list of blocks, like mlink,
-// but it is opaque to the garbage collector.
-// The GC does not trace the pointers during collection,
-// and the compiler does not emit write barriers for assignments
-// of gclinkptr values. Code should store references to gclinks
-// as gclinkptr, not as *gclink.
+//A gclink is a node in a linked list of blocks, like mlink,
+//but it is opaque to the garbage collector.
+//The GC does not trace the pointers during collection,
+//and the compiler does not emit write barriers for assignments
+//of gclinkptr values. Code should store references to gclinks
+//as gclinkptr, not as *gclink.
 type gclink struct {
 	next gclinkptr
 }
@@ -135,6 +135,7 @@ func (c *mcache) refill(spc spanClass) {
 	}
 
 	// Get a new cached span from the central lists.
+	// 向mcentral获取新的span列表，并赋值给mcache
 	s = mheap_.central[spc].mcentral.cacheSpan()
 	if s == nil {
 		throw("out of memory")

@@ -467,6 +467,7 @@ type g struct {
 	// scan work. We track this in bytes to make it fast to update
 	// and check for debt in the malloc hot path. The assist ratio
 	// determines how this corresponds to scan work debt.
+	// g可以分配的信用字节，如果为正，可以直接分配，如果为负，则需要先
 	gcAssistBytes int64
 }
 
@@ -488,7 +489,7 @@ type m struct {
 	nextp         puintptr
 	oldp          puintptr // the p that was attached before executing a syscall
 	id            int64
-	mallocing     int32
+	mallocing     int32 // 1分配内存状态 0不在内存分配状态
 	throwing      int32
 	preemptoff    string // if != "", keep curg running on this m
 	locks         int32

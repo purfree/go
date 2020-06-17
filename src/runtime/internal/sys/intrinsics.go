@@ -10,7 +10,8 @@
 package sys
 
 // Using techniques from http://supertech.csail.mit.edu/papers/debruijn.pdf
-
+// 1000011000101000111001001011001101001111010101110110111111
+// 根据公式 uint64(1<<i) * deBruijn64ctz >> 58 预生成i=1～63内的值，即deBruijnIdx64ctz
 const deBruijn64ctz = 0x0218a392cd3d5dbf
 
 var deBruijnIdx64ctz = [64]byte{
@@ -36,10 +37,23 @@ var deBruijnIdx32ctz = [32]byte{
 // Ctz64 counts trailing (low-order) zeroes,
 // and if all are zero, then 64.
 func Ctz64(x uint64) int {
-	x &= -x                       // isolate low-order bit
-	y := x * deBruijn64ctz >> 58  // extract part of deBruijn sequence
+	// 这里将x从右向左，第一个1的位置向前的值全部清零
+	// 例如x=58 二进制为111010，则结果为2(10)
+	// x=48 二进制为110000，则结果为16(10000)
+	x &= -x // isolate low-order bit
+	// 德布鲁因序列(De Bruijn sequence)，记为B(k, n)，是 k 元素构成的循环序列。所有长度为 n 的 k 元素构成序列都在它的子序列（以环状形式）中，出现并且仅出现一次。
+	// deBruijn64ctz是一个deBruijn序列b(2,6)
+	// x是2^n次方，所以x * deBruijn64ctz等于将deBruijn64ctz右移n位
+	// 而deBruijn64ctz是一个6位的循环序列，所以右移58位
+	y := x * deBruijn64ctz >> 58 // extract part of deBruijn sequence
+	// deBruijnIdx64ctz是计算好的deBruijnIdx64ctz指定序列位置值的末尾0数量
+	// 因为deBruijnIdx64ctz是64位循环的，只需要计算deBruijn64ctz偏移0～63的值，即deBruijnIdx64ctz，这样硬编码后，就可以快速读取
 	i := int(deBruijnIdx64ctz[y]) // convert to bit index
-	z := int((x - 1) >> 57 & 64)  // adjustment if zero
+	// 当x小于(1<<57)时，因为正数右移不会为负，0右移仍为0，所有0&64=0
+	// 当x大于(1<<57)时，因为最大64位，右移57位后，最高只有7位，但x-1，导致只有6位，而64=1<<6为7位，结果仍为0
+	// 当x为0时，x - 1为负数，int(-1&64)=64
+	// 所有这里是将0变为64
+	z := int((x - 1) >> 57 & 64) // adjustment if zero
 	return i + z
 }
 

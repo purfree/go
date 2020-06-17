@@ -39,6 +39,7 @@ func (c *mcentral) init(spc spanClass) {
 // Allocate a span to use in an mcache.
 func (c *mcentral) cacheSpan() *mspan {
 	// Deduct credit for this span allocation and sweep if necessary.
+	// 计算需要申请的内存大小spanBytes
 	spanBytes := uintptr(class_to_allocnpages[c.spanclass.sizeclass()]) * _PageSize
 	deductSweepCredit(spanBytes, 0)
 
@@ -50,7 +51,9 @@ func (c *mcentral) cacheSpan() *mspan {
 	sg := mheap_.sweepgen
 retry:
 	var s *mspan
+	// 遍历c.nonempty，查看使用有空闲的mspan
 	for s = c.nonempty.first; s != nil; s = s.next {
+		// s.sweepgen == sg-2，说明mspan需要sweep
 		if s.sweepgen == sg-2 && atomic.Cas(&s.sweepgen, sg-2, sg-1) {
 			c.nonempty.remove(s)
 			c.empty.insertBack(s)
@@ -58,10 +61,12 @@ retry:
 			s.sweep(true)
 			goto havespan
 		}
+		// s.sweepgen == sg-1，说明mspan正在sweep，不能使用，看你其他g在调用
 		if s.sweepgen == sg-1 {
 			// the span is being swept by background sweeper, skip
 			continue
 		}
+		// s.sweepgen其它状态，可以直接使用
 		// we have a nonempty span that does not require sweeping, allocate from it
 		c.nonempty.remove(s)
 		c.empty.insertBack(s)
@@ -69,6 +74,7 @@ retry:
 		goto havespan
 	}
 
+	// 遍历c.empty，查看使用有空闲的mspan
 	for s = c.empty.first; s != nil; s = s.next {
 		if s.sweepgen == sg-2 && atomic.Cas(&s.sweepgen, sg-2, sg-1) {
 			// we have an empty span that requires sweeping,
@@ -78,6 +84,7 @@ retry:
 			c.empty.insertBack(s)
 			unlock(&c.lock)
 			s.sweep(true)
+			// 这里是按照mcache的方式分配mspan
 			freeIndex := s.nextFreeIndex()
 			if freeIndex != s.nelems {
 				s.freeindex = freeIndex
@@ -103,6 +110,7 @@ retry:
 	unlock(&c.lock)
 
 	// Replenish central list if empty.
+	// mcentral没有空闲的mspan，需要向mheap申请
 	s = c.grow()
 	if s == nil {
 		return nil

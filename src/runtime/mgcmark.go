@@ -383,9 +383,12 @@ func gcAssistAlloc(gp *g) {
 	// Don't assist in non-preemptible contexts. These are
 	// generally fragile and won't allow the assist to block.
 	if getg() == gp.m.g0 {
+		// 当前运行的g是g0，g0是调度栈goroutine
 		return
 	}
 	if mp := getg().m; mp.locks > 0 || mp.preemptoff != "" {
+		// 当前运行的g有锁或者非抢占式的
+		// 因为当gcAssistBytes小于0，当前g会陷入休眠状态，如果非抢占式的，则不会有新的g运行
 		return
 	}
 
@@ -395,10 +398,14 @@ retry:
 	// balance positive. When the required amount of work is low,
 	// we over-assist to build up credit for future allocations
 	// and amortize the cost of assisting.
+	// gp.gcAssistBytes为负，所有-gp.gcAssistBytes返回负债字节
 	debtBytes := -gp.gcAssistBytes
+	// 计算扫描的工作量
 	scanWork := int64(gcController.assistWorkPerByte * float64(debtBytes))
 	if scanWork < gcOverAssistWork {
+		// 如果scanWork太小，直接分配gcOverAssistWork
 		scanWork = gcOverAssistWork
+		// 重新计算负债
 		debtBytes = int64(gcController.assistBytesPerWork * float64(scanWork))
 	}
 
@@ -408,21 +415,28 @@ retry:
 	// will just cause steals to fail until credit is accumulated
 	// again, so in the long run it doesn't really matter, but we
 	// do have to handle the negative credit case.
+	// bgScanCredit是当前剩余的信用，全局的
 	bgScanCredit := atomic.Loadint64(&gcController.bgScanCredit)
+	// stolen表示当前g可以从gcController偷取多少信用
 	stolen := int64(0)
 	if bgScanCredit > 0 {
 		if bgScanCredit < scanWork {
+			// 信用不足，全部偷取
 			stolen = bgScanCredit
+			// 重新计算gcAssistBytes值
 			gp.gcAssistBytes += 1 + int64(gcController.assistBytesPerWork*float64(stolen))
 		} else {
 			stolen = scanWork
 			gp.gcAssistBytes += debtBytes
 		}
+		// 减掉被偷走的信用
 		atomic.Xaddint64(&gcController.bgScanCredit, -stolen)
 
+		// 工作量减去支付的信用(从gcController偷取的)
 		scanWork -= stolen
 
 		if scanWork == 0 {
+			// scanWork偷取量足够的信用，直接返回
 			// We were able to steal all of the credit we
 			// needed.
 			if traced {
@@ -431,13 +445,16 @@ retry:
 			return
 		}
 	}
+	// 全局信用为负gcController.bgScanCredit，当前g休眠，启用gc mark
 
 	if trace.enabled && !traced {
+		// 上下文跟踪，功能无关
 		traced = true
 		traceGCMarkAssistStart()
 	}
 
 	// Perform assist work
+	// 启动gc辅助，帮助mark
 	systemstack(func() {
 		gcAssistAlloc1(gp, scanWork)
 		// The user stack may have moved, so this can't touch
@@ -459,6 +476,7 @@ retry:
 		// If this is because we were preempted, reschedule
 		// and try some more.
 		if gp.preempt {
+			// 当前g信用为负，可能会被其他g抢占调度
 			Gosched()
 			goto retry
 		}
@@ -507,6 +525,7 @@ func gcAssistAlloc1(gp *g, scanWork int64) {
 		// stack to determine if we should perform an assist.
 
 		// GC is done, so ignore any remaining debt.
+		// 非GC标记阶段，忽略负债
 		gp.gcAssistBytes = 0
 		return
 	}
@@ -522,12 +541,14 @@ func gcAssistAlloc1(gp *g, scanWork int64) {
 	}
 
 	// gcDrainN requires the caller to be preemptible.
+	// 变更gp的状态，等待状态，因为要gc mark
 	casgstatus(gp, _Grunning, _Gwaiting)
 	gp.waitreason = waitReasonGCAssistMarking
 
 	// drain own cached work first in the hopes that it
 	// will be more cache friendly.
 	gcw := &getg().m.p.ptr().gcw
+	// 扫描对象并标记
 	workDone := gcDrainN(gcw, scanWork)
 
 	casgstatus(gp, _Gwaiting, _Grunning)
@@ -560,6 +581,7 @@ func gcAssistAlloc1(gp *g, scanWork int64) {
 	_p_ := gp.m.p.ptr()
 	_p_.gcAssistTime += duration
 	if _p_.gcAssistTime > gcAssistTimeSlack {
+		// g执行gc总时间达到gcAssistTimeSlack，则gcController.assistTime加上gc时间
 		atomic.Xaddint64(&gcController.assistTime, _p_.gcAssistTime)
 		_p_.gcAssistTime = 0
 	}
@@ -1077,6 +1099,7 @@ done:
 //go:nowritebarrier
 //go:systemstack
 func gcDrainN(gcw *gcWork, scanWork int64) int64 {
+	// gc mark阶段启动写屏障
 	if !writeBarrier.needed {
 		throw("gcDrainN phase incorrect")
 	}
@@ -1086,9 +1109,13 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 	workFlushed := -gcw.scanWork
 
 	gp := getg().m.curg
+	// !gp.preempt 如果g不是抢占式的，就退出，每次循环检测
+	// workFlushed+gcw.scanWork < scanWork 如果完成scanWork的工作量，则退出
+	// workFlushed是执行前的值，gcw.scanWork每次循环都会更新当前工作量
 	for !gp.preempt && workFlushed+gcw.scanWork < scanWork {
 		// See gcDrain comment.
 		if work.full == 0 {
+			// work空的，开始平衡work和gcwork，将gcwork的缓存放到work
 			gcw.balance()
 		}
 
@@ -1097,6 +1124,7 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 		//         PREFETCH(wbuf->obj[wbuf.nobj - 3];
 		//  }
 		//
+		// 获取一个对象，从gcw.wbuf1获取
 		b := gcw.tryGetFast()
 		if b == 0 {
 			b = gcw.tryGet()
@@ -1109,6 +1137,7 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 		}
 
 		if b == 0 {
+			// 缓存池没有对象，从根对象扫描标记
 			// Try to do a root job.
 			//
 			// TODO: Assists should get credit for this
@@ -1121,6 +1150,7 @@ func gcDrainN(gcw *gcWork, scanWork int64) int64 {
 				}
 			}
 			// No heap or root jobs.
+			// 没有需要标记的对象
 			break
 		}
 		scanobject(b, gcw)

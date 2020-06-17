@@ -199,6 +199,7 @@ dohash:
 	return unsafe.Pointer(&zeroVal[0]), false
 }
 
+// map[key] = value, s==key, key is string
 func mapassign_faststr(t *maptype, h *hmap, s string) unsafe.Pointer {
 	if h == nil {
 		panic(plainError("assignment to entry in nil map"))
@@ -207,6 +208,7 @@ func mapassign_faststr(t *maptype, h *hmap, s string) unsafe.Pointer {
 		callerpc := getcallerpc()
 		racewritepc(unsafe.Pointer(h), callerpc, funcPC(mapassign_faststr))
 	}
+	// 判断是否并发写
 	if h.flags&hashWriting != 0 {
 		throw("concurrent map writes")
 	}
@@ -214,14 +216,18 @@ func mapassign_faststr(t *maptype, h *hmap, s string) unsafe.Pointer {
 	hash := t.hasher(noescape(unsafe.Pointer(&s)), uintptr(h.hash0))
 
 	// Set hashWriting after calling t.hasher for consistency with mapassign.
+	// 状态变更为写
 	h.flags ^= hashWriting
 
 	if h.buckets == nil {
+		// bucket未初始化，在这里初始化
 		h.buckets = newobject(t.bucket) // newarray(t.bucket, 1)
 	}
 
 again:
+	// hash的低位用于定位存储桶的索引，位数=(1<<h.B-1)
 	bucket := hash & bucketMask(h.B)
+	// 判断是否发生过扩容,
 	if h.growing() {
 		growWork_faststr(t, h, bucket)
 	}
@@ -382,6 +388,7 @@ search:
 func growWork_faststr(t *maptype, h *hmap, bucket uintptr) {
 	// make sure we evacuate the oldbucket corresponding
 	// to the bucket we're about to use
+	// bucket&h.oldbucketmask()计算bucket扩容前的位置
 	evacuate_faststr(t, h, bucket&h.oldbucketmask())
 
 	// evacuate one more oldbucket to make progress on growing
@@ -392,39 +399,59 @@ func growWork_faststr(t *maptype, h *hmap, bucket uintptr) {
 
 func evacuate_faststr(t *maptype, h *hmap, oldbucket uintptr) {
 	b := (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.bucketsize)))
+
+	// oldbucket = bucket&h.oldbucketmask()
+	// 以B=4, bucket=9=>1001为例
+	// 等量扩容，位置不变, oldbucket=9&(1<<4-1) => 1001&1111 = 9 => 1001
+	// 非等量扩容，容量变化2^B==>2^(B+1), oldbucket=9&(1<<(4-1)-1) => 1001&111 = 1 => 1
+
+	// 等量扩容 newbit= 1<<4 =16 => 10000
+	// 非等量扩容 newbit= 1<<(4-1) = 8 => 1000
 	newbit := h.noldbuckets()
+	// 判断b是否已搬运到新的buckets
 	if !evacuated(b) {
 		// TODO: reuse overflow buckets instead of using new ones, if there
 		// is no iterator using the old buckets.  (If !oldIterator.)
 
 		// xy contains the x and y (low and high) evacuation destinations.
 		var xy [2]evacDst
+		// x为搬迁后的bucket地址，与老的bucket地址相同，发生等量扩容
 		x := &xy[0]
 		x.b = (*bmap)(add(h.buckets, oldbucket*uintptr(t.bucketsize)))
 		x.k = add(unsafe.Pointer(x.b), dataOffset)
 		x.e = add(x.k, bucketCnt*2*sys.PtrSize)
 
+		// 判断是否等量扩容
+		// 等量扩容位置不变
+		// 非等量扩容位置发生变更
 		if !h.sameSizeGrow() {
 			// Only calculate y pointers if we're growing bigger.
 			// Otherwise GC can see bad pointers.
+			// y为搬迁后的bucket地址，非等量扩容
+			// 例: newbucket= 1+8 = 9, 等于bucket(9)
 			y := &xy[1]
 			y.b = (*bmap)(add(h.buckets, (oldbucket+newbit)*uintptr(t.bucketsize)))
 			y.k = add(unsafe.Pointer(y.b), dataOffset)
 			y.e = add(y.k, bucketCnt*2*sys.PtrSize)
 		}
 
+		// 遍历桶的内容，包括溢出部分
 		for ; b != nil; b = b.overflow(t) {
 			k := add(unsafe.Pointer(b), dataOffset)
 			e := add(k, bucketCnt*2*sys.PtrSize)
 			for i := 0; i < bucketCnt; i, k, e = i+1, add(k, 2*sys.PtrSize), add(e, uintptr(t.elemsize)) {
 				top := b.tophash[i]
 				if isEmpty(top) {
+					// 如果当前位置为空，无需移动到新的buckets
 					b.tophash[i] = evacuatedEmpty
 					continue
 				}
 				if top < minTopHash {
 					throw("bad map state")
 				}
+				// useY用来判断是使用x还是y作为搬迁的目的地地址
+				// 等量扩容，偏移量不变，使用x
+				// 非等量扩容，，偏移量变化，使用y
 				var useY uint8
 				if !h.sameSizeGrow() {
 					// Compute hash to make our evacuation decision (whether we need
@@ -439,7 +466,10 @@ func evacuate_faststr(t *maptype, h *hmap, oldbucket uintptr) {
 				dst := &xy[useY]                 // evacuation destination
 
 				if dst.i == bucketCnt {
+					// 如果进入这里，说明正常的8个槽已经填满，需要放到溢出bucket
+					// newoverflow返回一个可用的bucket
 					dst.b = h.newoverflow(t, dst.b)
+					// 重置bucket位置
 					dst.i = 0
 					dst.k = add(unsafe.Pointer(dst.b), dataOffset)
 					dst.e = add(dst.k, bucketCnt*2*sys.PtrSize)
@@ -461,6 +491,9 @@ func evacuate_faststr(t *maptype, h *hmap, oldbucket uintptr) {
 		}
 		// Unlink the overflow buckets & clear key/elem to help GC.
 		if h.flags&oldIterator == 0 && t.bucket.ptrdata != 0 {
+			// 如果不在oldIterator状态，说明没有for range，被外部引用
+			// 且bucket包含指针，说明不会被overflow和oldoverflow引用
+			// 可以释放当前的内存
 			b := add(h.oldbuckets, oldbucket*uintptr(t.bucketsize))
 			// Preserve b.tophash because the evacuation
 			// state is maintained there.

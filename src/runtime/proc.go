@@ -4673,6 +4673,7 @@ func preemptone(_p_ *p) bool {
 		return false
 	}
 
+	// 将p状态改为抢占式
 	gp.preempt = true
 
 	// Every call in a go routine checks for stack overflow by

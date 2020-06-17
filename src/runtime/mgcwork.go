@@ -269,11 +269,13 @@ func (w *gcWork) putBatch(obj []uintptr) {
 func (w *gcWork) tryGet() uintptr {
 	wbuf := w.wbuf1
 	if wbuf == nil {
+		// wbuf1置空，wbuf2塞满，从work获取
 		w.init()
 		wbuf = w.wbuf1
 		// wbuf is empty at this point.
 	}
 	if wbuf.nobj == 0 {
+		// wbuf1为空，交互wbuf1和wbuf2
 		w.wbuf1, w.wbuf2 = w.wbuf2, w.wbuf1
 		wbuf = w.wbuf1
 		if wbuf.nobj == 0 {
@@ -356,11 +358,13 @@ func (w *gcWork) balance() {
 		return
 	}
 	if wbuf := w.wbuf2; wbuf.nobj != 0 {
+		// 如果wbuf2不为空，将wbuf2放入work
 		w.checkPut(0, wbuf.obj[:wbuf.nobj])
 		putfull(wbuf)
 		w.flushedWork = true
 		w.wbuf2 = getempty()
 	} else if wbuf := w.wbuf1; wbuf.nobj > 4 {
+		// 如果wbuf1不为空且对象数量大于4，放入work
 		w.checkPut(0, wbuf.obj[:wbuf.nobj])
 		w.wbuf1 = handoff(wbuf)
 		w.flushedWork = true // handoff did putfull
@@ -369,6 +373,8 @@ func (w *gcWork) balance() {
 	}
 	// We flushed a buffer to the full list, so wake a worker.
 	if gcphase == _GCmark {
+		// 如果是在标记阶段，则唤醒另外的worker(m)
+		// 随机选择一个g，标记为可抢占式，以便可以帮助处理给work分配的任务
 		gcController.enlistWorker()
 	}
 }

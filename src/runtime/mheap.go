@@ -361,7 +361,8 @@ type mspan struct {
 	list *mSpanList // For debugging. TODO: Remove.
 
 	startAddr uintptr // address of first byte of span aka s.base()
-	npages    uintptr // number of pages in span
+	// 页的数量
+	npages uintptr // number of pages in span
 
 	manualFreeList gclinkptr // list of free objects in mSpanManual spans
 
@@ -380,9 +381,12 @@ type mspan struct {
 	// undefined and should never be referenced.
 	//
 	// Object n starts at address n*elemsize + (start << pageShift).
+	// freeindex表示[0,nelems]第一个空闲元素槽的索引
+	// 例如0~10已被分配，则freeindex=11
 	freeindex uintptr
 	// TODO: Look up nelems from sizeclass and remove this field if it
 	// helps performance.
+	// 可以存储的元素数量。通过npages*pageSize/elemsize计算得到
 	nelems uintptr // number of object in the span.
 
 	// Cache of the allocBits at freeindex. allocCache is shifted
@@ -391,6 +395,9 @@ type mspan struct {
 	// ctz (count trailing zero) to use it directly.
 	// allocCache may contain bits beyond s.nelems; the caller must ignore
 	// these.
+	// 二进制位，从右向左直到找到1为止，假设为4，则freeindex+4槽位是空闲的
+	// 例如111111111111111111111111111111111111111111111111111111111111111，则freeindex+0位槽为空闲的
+	// 例如111111111111111111111111111111111111111111111111111111111111110，则freeindex+1位槽为空闲的
 	allocCache uint64
 
 	// allocBits and gcmarkBits hold pointers to a span's mark and
@@ -429,7 +436,7 @@ type mspan struct {
 	sweepgen    uint32
 	divMul      uint16        // for divide by elemsize - divMagic.mul
 	baseMask    uint16        // if non-0, elemsize is a power of 2, & this will get object allocation base
-	allocCount  uint16        // number of allocated objects
+	allocCount  uint16        // number of allocated objects 已分配的对象数量
 	spanclass   spanClass     // size class and noscan (uint8)
 	state       mSpanStateBox // mSpanInUse etc; accessed atomically (get/set methods)
 	needzero    uint8         // needs to be zeroed before allocation

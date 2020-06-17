@@ -264,6 +264,7 @@ var writeBarrier struct {
 // gcBlackenEnabled is 1 if mutator assists and background mark
 // workers are allowed to blacken objects. This must only be set when
 // gcphase == _GCmark.
+// gcBlackenEnabled=1表示对象可以被标记为黑，只能是gcphase == _GCmark阶段
 var gcBlackenEnabled uint32
 
 const (
@@ -387,6 +388,7 @@ type gcControllerState struct {
 	// bytes that should be performed by mutator assists. This is
 	// computed at the beginning of each cycle and updated every
 	// time heap_scan is updated.
+	// 当前gc循环每个字节的工作量，每次gc开始重新生成
 	assistWorkPerByte float64
 
 	// assistBytesPerWork is 1/assistWorkPerByte.
@@ -654,6 +656,7 @@ func (c *gcControllerState) enlistWorker() {
 		return
 	}
 	myID := gp.m.p.ptr().id
+	// 找到一个运行状态的p，重试5次
 	for tries := 0; tries < 5; tries++ {
 		id := int32(fastrandn(uint32(gomaxprocs - 1)))
 		if id >= myID {
@@ -934,6 +937,7 @@ const gcAssistTimeSlack = 5000
 // assist by pre-paying for this many bytes of future allocations.
 const gcOverAssistWork = 64 << 10
 
+// 全局的work，单线程为gcwork
 var work struct {
 	full  lfstack          // lock-free list of full blocks workbuf
 	empty lfstack          // lock-free list of empty blocks workbuf
@@ -968,7 +972,9 @@ var work struct {
 	// (and thus 8-byte alignment even on 32-bit architectures).
 	bytesMarked uint64
 
+	// 下一个待标记的根对象
 	markrootNext uint32 // next markroot job
+	// 需要标记的根对象数量
 	markrootJobs uint32 // number of markroot jobs
 
 	nproc  uint32

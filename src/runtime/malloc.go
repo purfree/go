@@ -302,6 +302,9 @@ const (
 	//
 	// On other platforms, the user address space is contiguous
 	// and starts at 0, so no offset is necessary.
+	// https://groups.google.com/forum/#!searchin/golang-checkins/arenaBaseOffset%7Csort:date/golang-checkins/TP5Yu_c66O0/Nf-7xgJgAAAJ
+	// 没完全看懂，大概意思是在amd64为系统上，虚拟地址空间是[-2^47, 2^47)，在solaris/amd64系统上，负数部分是用户地址空间
+	// 所以通过偏移1<<47位，将地址空间变成[0, 2^48)，避免系统因为地址空间不可用，panic
 	arenaBaseOffset = sys.GoarchAmd64*(1<<47) + (^0x0a00000000000000+1)&uintptrMask*sys.GoosAix
 
 	// Max number of threads to run garbage collection.
@@ -829,14 +832,20 @@ var zerobase uintptr
 // nextFreeFast returns the next free object if one is quickly available.
 // Otherwise it returns 0.
 func nextFreeFast(s *mspan) gclinkptr {
+	// 计算s.allocCache末尾0个数，s.freeindex + theBit即可找出距离起始地址最近的空闲槽索引
 	theBit := sys.Ctz64(s.allocCache) // Is there a free object in the allocCache?
 	if theBit < 64 {
+		// s.freeindex为上一次分配的空闲槽索引，距离起始地址最近的
+		// result表示目前距离起始地址最近的空闲槽索引
 		result := s.freeindex + uintptr(theBit)
+		// s.nelems是槽位置总量，超过则表示mspan已满
 		if result < s.nelems {
 			freeidx := result + 1
 			if freeidx%64 == 0 && freeidx != s.nelems {
+				// 如果一轮循环结束，即已分配64个槽，返回并重新生成s.allocCache，根据从s.freeindex到s.freeindex+63槽的使用情况，参加refillAllocCache()函数
 				return 0
 			}
+			// 更新
 			s.allocCache >>= uint(theBit + 1)
 			s.freeindex = freeidx
 			s.allocCount++
@@ -860,11 +869,13 @@ func (c *mcache) nextFree(spc spanClass) (v gclinkptr, s *mspan, shouldhelpgc bo
 	shouldhelpgc = false
 	freeIndex := s.nextFreeIndex()
 	if freeIndex == s.nelems {
+		// spc类型的span已经用完，没有空闲的
 		// The span is full.
 		if uintptr(s.allocCount) != s.nelems {
 			println("runtime: s.allocCount=", s.allocCount, "s.nelems=", s.nelems)
 			throw("s.allocCount != s.nelems && freeIndex == s.nelems")
 		}
+		// mheap重新分配spc类型的span
 		c.refill(spc)
 		shouldhelpgc = true
 		s = c.alloc[spc]
@@ -888,8 +899,11 @@ func (c *mcache) nextFree(spc spanClass) (v gclinkptr, s *mspan, shouldhelpgc bo
 // Allocate an object of size bytes.
 // Small objects are allocated from the per-P cache's free lists.
 // Large objects (> 32 kB) are allocated straight from the heap.
+// 分配一个size字节，类型为typ的对象
 func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 	if gcphase == _GCmarktermination {
+		// gc mark结束阶段，不能分配对象
+		// 猜测如果分配对象，会被接下来的垃圾回收释放
 		throw("mallocgc called with gcphase == _GCmarktermination")
 	}
 
@@ -898,6 +912,7 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 	}
 
 	if debug.sbrk != 0 {
+		// debug测试，不会进行内存分配和垃圾回收
 		align := uintptr(16)
 		if typ != nil {
 			// TODO(austin): This should be just
@@ -924,15 +939,21 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 	// GC is not currently active.
 	var assistG *g
 	if gcBlackenEnabled != 0 {
+		// gcmark阶段，对象可以标记为黑
+		// 标记阶段分配对象，需要计算信用系统，用于触发gc
 		// Charge the current user G for this allocation.
+		// assistG表示当前正在运行的goroutine
 		assistG = getg()
 		if assistG.m.curg != nil {
 			assistG = assistG.m.curg
 		}
 		// Charge the allocation against the G. We'll account
 		// for internal fragmentation at the end of mallocgc.
+		// gcAssistBytes表示当前g上面可以分配的信用系统字节
+		// 每次减去分配的字节
 		assistG.gcAssistBytes -= int64(size)
 
+		// 本地信用不足，需要向全局的信用系统申请
 		if assistG.gcAssistBytes < 0 {
 			// This G is in debt. Assist the GC to correct
 			// this before allocating. This must happen
@@ -955,8 +976,11 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 	dataSize := size
 	c := gomcache()
 	var x unsafe.Pointer
+	// noscan表示是否需要扫描
+	// 类型为空或者不包含指针，无需扫描
 	noscan := typ == nil || typ.ptrdata == 0
 	if size <= maxSmallSize {
+		// 小对象，maxSmallSize是66个小对象类型中最大的
 		if noscan && size < maxTinySize {
 			// Tiny allocator.
 			//
@@ -990,10 +1014,13 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 			off := c.tinyoffset
 			// Align tiny pointer for required (conservative) alignment.
 			if size&7 == 0 {
+				// size=8,因为与7(111)的结果为0，说明末尾3位为0
 				off = alignUp(off, 8)
 			} else if size&3 == 0 {
+				// size=4
 				off = alignUp(off, 4)
 			} else if size&1 == 0 {
+				//size=2
 				off = alignUp(off, 2)
 			}
 			if off+size <= maxTinySize && c.tiny != 0 {
@@ -1005,10 +1032,13 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 				releasem(mp)
 				return x
 			}
+			// mcache上的未分配tiny对象已用完
 			// Allocate a new maxTinySize block.
 			span := c.alloc[tinySpanClass]
+			// 查看分配的缓存中是否有空闲的
 			v := nextFreeFast(span)
 			if v == 0 {
+				// 从mcentral获取
 				v, _, shouldhelpgc = c.nextFree(tinySpanClass)
 			}
 			x = unsafe.Pointer(v)
@@ -1023,12 +1053,15 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 			size = maxTinySize
 		} else {
 			var sizeclass uint8
+			// 通过内存对齐，计算需要的合适的内存大小
 			if size <= smallSizeMax-8 {
 				sizeclass = size_to_class8[(size+smallSizeDiv-1)/smallSizeDiv]
 			} else {
 				sizeclass = size_to_class128[(size-smallSizeMax+largeSizeDiv-1)/largeSizeDiv]
 			}
 			size = uintptr(class_to_size[sizeclass])
+			// c.alloc第sizeclass*2位存储的是值，第sizeclass*2+1位存储的是指针
+			// makeSpanClass算出sizeclass对应的spanclass
 			spc := makeSpanClass(sizeclass, noscan)
 			span := c.alloc[spc]
 			v := nextFreeFast(span)
@@ -1041,6 +1074,7 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 			}
 		}
 	} else {
+		// 大对象
 		var s *mspan
 		shouldhelpgc = true
 		systemstack(func() {
