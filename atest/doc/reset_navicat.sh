@@ -1,0 +1,7 @@
+#!/bin/bash
+DSTR=$(date +%Y%m%d)
+defaults write ~/Library/Preferences/com.prect.NavicatPremium12.plist ptc121 "$DSTR"
+#defaults write ~/Library/Preferences/com.prect.NavicatPremium12.plist afksopoorn121 "$DSTR"
+
+echo -n "$DSTR" > ~/Library/Application\ Support/PremiumSoft\ CyberTech/Navicat\ CC/Navicat\ Premium/.tc121
+#echo -n "$DSTR" > ~/Library/Caches/com.prect.NavicatPremium12/.tcl120
